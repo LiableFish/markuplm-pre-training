@@ -129,7 +129,7 @@ class DataCollatorForMarkupLMLanguageModelling(DataCollatorMixin):
         3. Sample pairs according to ratio, max_pairs and node labels
         4. Return pair indices and corresponding labels
         """
-        batch_size, _ = xpath_tags_seq.shape
+        batch_size, _, _ = xpath_tags_seq.shape
 
         # TODO: this can be done on dataset creation level along with tokenization, not on dynamic collator level
         node_relations = get_directed_node_relation(
@@ -147,14 +147,15 @@ class DataCollatorForMarkupLMLanguageModelling(DataCollatorMixin):
             subs_pad_id=self.tokenizer.pad_width,
         )  # [batch_size, seq_len]
 
-        mask = first_xpath_token_mask & special_tokens_mask # [batch_size, seq_len]
+        mask = first_xpath_token_mask & ~special_tokens_mask # [batch_size, seq_len]
         node_relations_mask = mask.unsqueeze(2) & mask.unsqueeze(1) # [batch_size, seq_len, seq_len]
-        
-        sample_pair_indices = []
+
+        nrp_ids = []
         # We have to iterate over batch size because the number of "true nodes" is not the same for each batch
+        # TODO: try using `torch.bernouli(torch.full(tensor.shape, self.max_node_pairs/tensor.shape[-1])` instead for approx sampling 
         for i in range(batch_size):
-            true_node_relations = node_relations[i][node_relations_mask[i]]
             true_node_pair_indices = torch.nonzero(node_relations_mask[i], as_tuple=False)
+            true_node_relations = node_relations[i][tuple(true_node_pair_indices.T)]
             n_non_others_pairs_to_sample = int(self.max_node_pairs * self.non_others_node_pairs_ratio)
 
             sample_non_others_pair_indices = self._sample_indices(
@@ -165,10 +166,19 @@ class DataCollatorForMarkupLMLanguageModelling(DataCollatorMixin):
                 true_node_pair_indices[true_node_relations == DirectedNodeRelation.OTHERS],
                 num_samples=self.max_node_pairs - n_non_others_pairs_to_sample,
             )
-            sample_pair_indices.append(torch.cat((sample_non_others_pair_indices, sample_others_pair_indices)))
+            sample_pair_indices = torch.cat((sample_non_others_pair_indices, sample_others_pair_indices), dim=0)
+            sample_pair_indices = torch.cat(
+                (
+                    torch.full((sample_pair_indices.shape[0], 1), fill_value=i),  # Adding batch id
+                    sample_pair_indices
+                ),
+                dim=1,
+            )
+            nrp_ids.append(sample_pair_indices)
 
-        sample_pair_indices = torch.cat(sample_pair_indices)
-        return sample_pair_indices, node_relations[sample_pair_indices]
+        nrp_ids = torch.cat(nrp_ids)
+        nrp_labels = node_relations[tuple(nrp_ids.T)]
+        return nrp_ids, nrp_labels
 
     @staticmethod    
     def _sample_indices(
